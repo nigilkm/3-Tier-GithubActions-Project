@@ -1,0 +1,251 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ${{ github.repository }}-backend
+  FRONTEND_IMAGE: ${{ github.repository }}-frontend
+
+jobs:
+  # ---------- 1. Lint ----------
+  lint:
+    name: Lint (ESLint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install backend deps
+        run: npm ci
+        working-directory: backend
+      - name: Lint backend
+        run: npm run lint
+        working-directory: backend
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+
+  # ---------- 2. Unit tests ----------
+  unit-tests:
+    name: Unit Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install backend deps
+        run: npm ci
+        working-directory: backend
+      - name: Run backend unit tests
+        run: npm run test:unit
+        working-directory: backend
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+      - name: Run frontend unit tests
+        run: npm test
+        working-directory: frontend
+
+  # ---------- 3. Integration tests (real Mongo service container) ----------
+  integration-tests:
+    name: Integration Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MONGO_URI: mongodb://localhost:27017/threetierdb_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install backend deps
+        run: npm ci
+        working-directory: backend
+      - name: Run full test suite with coverage
+        run: npm test
+        working-directory: backend
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage
+
+  # ---------- 4. Dependency / vulnerability audit ----------
+  dependency-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Audit backend deps
+        run: npm audit --audit-level=high
+        working-directory: backend
+        continue-on-error: true
+      - name: Audit frontend deps
+        run: npm audit --audit-level=high
+        working-directory: frontend
+        continue-on-error: true
+
+  # ---------- 5. Static analysis security testing (SAST) ----------
+  codeql:
+    name: CodeQL SAST
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+      - uses: github/codeql-action/analyze@v3
+
+  # ---------- 6. Build & push Docker images ----------
+  build-and-push:
+    name: Build & Push Images
+    needs: [unit-tests, integration-tests, dependency-audit]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      backend-tag: ${{ steps.meta.outputs.backend_tag }}
+      frontend-tag: ${{ steps.meta.outputs.frontend_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set image tags
+        id: meta
+        run: |
+          echo "backend_tag=${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "frontend_tag=${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.backend_tag }}
+            ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.frontend_tag }}
+            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------- 7. Container image vulnerability scan ----------
+  image-scan:
+    name: Trivy Image Scan
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-and-push.outputs.backend-tag }}
+          format: sarif
+          output: trivy-backend.sarif
+          severity: CRITICAL,HIGH
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build-and-push.outputs.frontend-tag }}
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: CRITICAL,HIGH
+      - name: Upload backend scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-backend.sarif
+      - name: Upload frontend scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-frontend.sarif
+
+  # ---------- 8. Validate k8s manifests ----------
+  k8s-manifest-lint:
+    name: Validate k8s Manifests
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin
+      - name: Validate manifests
+        run: kubeconform -strict -summary k8s/*.yaml
+
+  # ---------- 9. Deploy to Kubernetes (main branch only) ----------
+  deploy:
+    name: Deploy to Kubernetes
+    needs: [build-and-push, image-scan, k8s-manifest-lint]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+      - name: Apply base manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/secrets.yaml
+          kubectl apply -f k8s/mongo-pvc.yaml
+          kubectl apply -f k8s/mongo-deployment.yaml
+          kubectl apply -f k8s/mongo-service.yaml
+          kubectl apply -f k8s/backend-service.yaml
+          kubectl apply -f k8s/frontend-service.yaml
+          kubectl apply -f k8s/ingress.yaml
+      - name: Set new image tags and deploy
+        run: |
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/frontend-deployment.yaml
+          kubectl set image deployment/backend backend=${{ needs.build-and-push.outputs.backend-tag }} -n three-tier-app
+          kubectl set image deployment/frontend frontend=${{ needs.build-and-push.outputs.frontend-tag }} -n three-tier-app
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/backend -n three-tier-app --timeout=120s
+          kubectl rollout status deployment/frontend -n three-tier-app --timeout=120s

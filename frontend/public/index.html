@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Three Tier App - Inventory</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { font-family: sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+    input { margin: 4px; padding: 6px; }
+    button { padding: 6px 12px; cursor: pointer; }
+    li { margin: 6px 0; }
+  </style>
+</head>
+<body>
+  <h1>Inventory (Frontend Tier)</h1>
+  <div>
+    <input id="name" placeholder="Item name" />
+    <input id="quantity" type="number" placeholder="Quantity" />
+    <button id="addBtn">Add Item</button>
+  </div>
+  <ul id="itemList"></ul>
+
+  <script src="app.js"></script>
+</body>
+</html>

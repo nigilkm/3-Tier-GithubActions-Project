@@ -1,0 +1,13 @@
+{
+  "name": "three-tier-frontend",
+  "version": "1.0.0",
+  "description": "Frontend tier - static HTML/JS served by nginx",
+  "scripts": {
+    "lint": "eslint public --ext .js",
+    "test": "jest --coverage"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0"
+  }
+}
