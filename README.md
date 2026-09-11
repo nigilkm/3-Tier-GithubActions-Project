@@ -1,4 +1,4 @@
-# Three-Tier Node.js App — GitHub Actions + Kubernetes Learning Project
+# Three-Tier Node.js App — GitHub Actions + Kubernetes Learning Project ....
 
 ## Architecture
 - **Presentation tier**: `frontend/` — static HTML/JS served by nginx
